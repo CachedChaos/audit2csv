@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  audit2csv.sh [-A] [-a <auid> | -u <username>] (-i <audit.log> | -d <audit_dir>) [-o <out.csv>] [-F <fields>] [-D]
+  audit_acct_sessions_to_csv.sh [-A] [-a <auid> | -u <username>] (-i <audit.log> | -d <audit_dir>) [-o <out.csv>] [-F <fields>] [-D]
                                 [--human-time] [--local-time]
 
 Modes:
@@ -48,13 +48,13 @@ Time (FAST DEFAULT):
 
 Examples:
   # Fastest: all records, discover fields
-  ./audit2csv.sh -A -D -d /var/log/audit -o all_audit.csv
+  ./audit_acct_sessions_to_csv.sh -A -D -d /var/log/audit -o all_audit.csv
 
   # Fastest: session export by known auid
-  ./audit2csv.sh -a 1000 -D -i combinedaudit.log -o auid_1000.csv
+  ./audit_acct_sessions_to_csv.sh -a 99074 -D -i combinedaudit.log -o auid_99074.csv
 
   # Slower: human readable timestamps
-  ./audit2csv.sh -A -D -d /var/log/audit -o all_audit.csv --human-time
+  ./audit_acct_sessions_to_csv.sh -A -D -d /var/log/audit -o all_audit.csv --human-time
 EOF
 }
 
@@ -67,7 +67,7 @@ OUTCSV=""
 FIELDS=""
 ALL=0
 DISCOVER=0
-DISCOVER_MAX=10000
+DISCOVER_MAX=100000
 
 HUMAN_TIME=0
 LOCAL_TIME=0
@@ -127,7 +127,7 @@ else
     usage; exit 2
   fi
   if [[ -n "$AUID" && ! "$AUID" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: -a must be a numeric auid (example: -a 1000). Use -u for username lookup." >&2
+    echo "ERROR: -a must be a numeric auid (example: -a 99074). Use -u for username lookup." >&2
     exit 2
   fi
 fi
@@ -184,6 +184,7 @@ discover_fields_from_stream() {
   head -n "$max" \
     | tr -d '\r' \
     | tr '\035' ' ' \
+    | sed "s/msg='\''/msg='\'' /g" \
     | grep -oE '(^| )[A-Za-z_][A-Za-z0-9_-]*=("[^"]*"|[^ ]+)' \
     | sed -E 's/^ +//' \
     | cut -d= -f1 \
@@ -266,6 +267,11 @@ AWK_PROG='
   /type=/{
     line=$0;
     gsub(/\035/," ",line);
+    # Extract nested msg='...'
+    inner_msg="";
+    if (match(line,/ msg='\''([^'\'']*)'\''/,mm)) {
+      inner_msg = " " mm[1];   # leading space helps (^| ) matching for first token
+    }
 
     type="";
     if (match(line,/type=([^ ]+)/,m)) type=m[1];
@@ -344,21 +350,25 @@ AWK_PROG='
 
       re="(^| )[[:space:]]*" key "=\"([^\"]*)\"";
       if (match(line, re, y)) val=y[2];
+      else if (inner_msg != "" && match(inner_msg, re, y)) val=y[2];
       else {
         re2="(^| )[[:space:]]*" key "=([^ ]+)";
         if (match(line, re2, y2)) val=y2[2];
+        else if (inner_msg != "" && match(inner_msg, re2, y2)) val=y2[2];
         else {
           up=toupper(key);
           re3="(^| )[[:space:]]*" up "=\"([^\"]*)\"";
           if (match(line, re3, y3)) val=y3[2];
+          else if (inner_msg != "" && match(inner_msg, re3, y3)) val=y3[2];
         }
       }
 
-      # Always decode proctitle when it is extracted
-      if (tolower(key) == "proctitle" && val != "") {
+      # Decode common hex-encoded command fields
+      lk = tolower(key);
+      if ((lk == "proctitle" || lk == "cmd" || lk == "user_cmd") && val != "") {
         val = decode_proctitle(val);
       }
-
+      
       extras = extras OFS q(val);
     }
 
